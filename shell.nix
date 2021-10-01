@@ -3,12 +3,15 @@
   }:
   pkgs.mkShell {
     buildInputs = with pkgs; [
+      llvmPackages.bintools
       zlib.out
       rustup
       xorriso
       grub2
       entr
+      qemu
       llvmPackages.lld
+      python3
     ];
     shellHook = ''
       export HISTFILE=${toString ./.history}

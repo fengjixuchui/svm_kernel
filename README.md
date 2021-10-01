@@ -1,97 +1,110 @@
-## ==== WORK IN PROGRESS ====
-Working grub bootloader, currently implementing mode switch to long mode
-
 ## Description
-x86_64 HPC AMD kernel written in Rust.
-Optimized for hypervisor usage.
+==== WORK IN PROGRESS ====
 
+Trying to get multicore to work.
+
+Goal:
+x86_64 AMD kernel optimized for extreme performance at the cost of ditching all security measures.
+In the future this should become a hypervisor.
 
 ## Setup & Debug Build
 Clone the repo with submodules:
-```
+```bash
 $ git clone --recursive <url>
 ```
 
-Pinned rustc version is found in [rust-toolchain](svm_kernel/rust-toolchain)
-
-Install the dependencies listed in `shell.nix` or execute
-`nix-shell shell.nix` if on NixOS.
-
-Install cargo dependencies:
-```
-$ cargo install -p svm_kernel/bootimage
-$ rustup component add llvm-tools-preview
+Install the [nix package manager](https://nixos.org/download.html).  
+The installation script requires that you have `sudo` access to `root`.
+```bash
+$ curl -L https://nixos.org/nix/install | sh
 ```
 
-Run in qemu with:
+To download all required pinned dependencies just execute:
+```bash
+$ cd <project_root>
+$ nix-shell shell.nix
 ```
+
+Then install cargo dependencies:
+```bash
+$ cd <project_root>
+$ cargo install --path bootimage
+$ rustup component add llvm-tools-preview rust-src
+```
+
+Now compile & run the kernel in qemu with:
+```bash
+$ cd <project_root>/svm_kernel
 $ cargo run
 ```
-Close the instance with CTRL+A,X
-or CTRL+C
+Close the instance with CTRL+C
 
-Build on filechange:
-```
-$ cd svm_kernel
+To build on filechange:
+```bash
+$ cargo install cargo-watch
 $ cargo watch
 ```
 
-## Release build:
-Execute:
+## View assembly with radare2
 ```bash
-$ cargo run --release
+$ cd <project_root>/svm_kernel
+$ r2 target/x86_64-os/debug/isofiles/boot/kernel.elf # View bootloader asm
 ```
-The resulting file lies in: `target/x86_64-os/release/bootimage-svm_kernel.bin`
-Flash it with:
 ```bash
-$ dd bs=5M if=target/x86_64-os/release/bootimage-svm_kernel.iso of=/dev/MYDEVICE
+$ cd <project_root>/svm_kernel
+$ r2 target/x86_64-os/debug/svm_kernel # View kernel asm
 ```
 
-OR
-Edit the file `Cargo.toml` and change `build-command` to `["build", "--release"]`
-Then execute `cargo bootimage --grub`
-
-## Generate & view assembly
-```
-$ cargo asm
-```
-
-You can find the asm file in `target/x86_64-os/release/deps/svm_kernel-*.s`
-
+Look into [svm_kernel/external/bootloader/linker.ld](svm_kernel/external/bootloader/linker.ld) to find the offset where the kernel gets mapped to.
 
 ## Debug with gdb
+
+Edit [Cargo.toml](./svm_kernel/Cargo.toml)
+and uncomment the `run-command` line to the line with `"-s", "-S"` at the end.  
+Debugging the *bootloader* with gdb
 ```bash
-$ qemu-kvm -cpu qemu64,+svm,vendor=AuthenticAMD -drive format=raw,file=target/x86_64-os/debug/bootimage-svm_kernel.bin -nographic -s -S
+$ cd <project_root>/svm_kernel
+$ gdb -ex "target remote: 1234" -ex "symbol-file target/x86_64-os/debug/isofiles/boot/kernel.elf"
 ```
-In another shell execute:
+
+Debugging the *kernel* with gdb
 ```bash
-$ gdb target/x86_64-os/debug/isofiles/boot/kernel.elf -ex "target remote:1234"
+$ cd <project_root>/svm_kernel
+$ gdb -ex "target remote: 1234" -ex "symbol-file target/x86_64-os/debug/svm_kernel"
 ```
-You have to use `hb` instead of `b` in gdb when using qemu-kvm. If not the breakpoints get ignored.
 
-If you want to debug other cores you have to use qemu in emulation mode and not in kvm mode!
-If qemu is in emulation mode gdb sees other cores as threads thus settings breakpoints has to be done
-as follows:
-List all cores and its IDs:
-```
-(gdb) thread
-```
-Set breakpoint
-```
-(gdb) break <location> thread <thread-id>
-```
+### Debugging a different cpu core 
+In gdb cpu cores get handled like threads. So to display all cpu cores execute: `info threads`
+To set a breakpoint on a different core execute: `hb <address> thread <cpu_num>`
+
+### Important
+If you use qemu with kvm you have to use [hardware breakpoints](https://en.wikipedia.org/wiki/Breakpoint#Implementations). Those are set with `hb <address>`
+
+In qemu emulation mode just use the normal breakpoints set with `b <address>`
 
 
 
-## Debug with radare2
+## Debug with qemu monitor
+Connect to [qemu monitor](https://qemu.readthedocs.io/en/latest/system/monitor.html) with
 ```
-$ r2 -B [TODO] target/x86_64-os/debug/svm_kernel
+$ nc 127.0.0.1 8124
+(qemu) help
 ```
-Look into [svm_kernel/external/bootloader/linker.ld](svm_kernel/external/bootloader/linker.ld) to find the offset where the kernel gets mapped to.
+
+To switch to a different cpu core, execute:
+```
+(qemu) cpu <core_num>-1
+```
+
+## Linker map
+The linker generates a linker map where all ELF objects are listed with their respective addresses.
+You can find the file under `<project_root>/svm_kernel/external/bootloader/target/linker.map`.
+
 
 ## Run tests
 To execute tests run:
 ```
+$ cd <project_root>/svm_kernel
 $ cargo test
 ```
 Run specific test:
@@ -99,7 +112,10 @@ Run specific test:
 $ cargo test --test heap_allocator
 ```
 
-
+## Developed on a
+* AMD Ryzen 5 3500U
+* EPYC-v1
+* AMD Family 17h Model 18h
 
 ## Resources
 * https://os.phil-opp.com/
@@ -111,5 +127,7 @@ $ cargo test --test heap_allocator
 * https://virtio-fs.gitlab.io/index.html#overview
 * https://gitlab.redox-os.org/redox-os/tfs
 * http://9p.cat-v.org/
+* https://www.linux-kvm.org/page/Tuning_Kernel
+
 
 

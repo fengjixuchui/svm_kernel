@@ -7,11 +7,14 @@
 
 #![no_std]
 #![feature(global_asm)]
-#![feature(llvm_asm)]
+#![feature(asm)]
 #![allow(incomplete_features)]
-#![feature(const_generics)]
+#![feature(adt_const_params)]
+#![feature(generic_const_exprs)]
 #![feature(abi_x86_interrupt)]
 #![feature(naked_functions)]
+#![feature(test)]
+#![feature(bench_black_box)]
 
 // The dependencies here are set to target_arch = x86 because
 // the 'bootimage' command first builds this crate as dependencie of the kernel
@@ -21,22 +24,29 @@
 
 pub mod bootinfo;
 
-#[cfg(target_arch="x86")]
-pub mod serial;
-#[cfg(target_arch="x86")]
-pub mod vga;
-#[cfg(target_arch="x86")]
-pub mod print;
-#[cfg(target_arch="x86")]
-pub mod mylog;
-#[cfg(target_arch="x86")]
-pub mod interrupts;
-#[cfg(target_arch="x86")]
+#[cfg(target_arch = "x86")]
 pub mod default_interrupt;
-#[cfg(target_arch="x86")]
+#[cfg(target_arch = "x86")]
+pub mod interrupts;
+#[cfg(target_arch = "x86")]
+pub mod media_extensions;
+#[cfg(target_arch = "x86")]
+pub mod mmu;
+#[cfg(target_arch = "x86")]
+pub mod mylog;
+#[cfg(target_arch = "x86")]
 pub mod pagetable;
+#[cfg(target_arch = "x86")]
+pub mod print;
+#[cfg(target_arch = "x86")]
+pub mod serial;
+#[cfg(target_arch = "x86")]
+pub mod smp;
+#[cfg(target_arch = "x86")]
+pub mod vga;
 
-global_asm!(include_str!("boot.s"));
+// TODO: Why does this need to be imported two times?
+global_asm!(include_str!("multiboot2_header.s"));
 
 pub const ONE_MEG: u64 = 1048576;
 pub const TWO_MEG: u64 = ONE_MEG * 2;
@@ -61,4 +71,3 @@ macro_rules! entry_point {
         }
     };
 }
-

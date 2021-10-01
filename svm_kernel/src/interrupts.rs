@@ -11,25 +11,30 @@ pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
 // IDT index numbers
+// IMPORTANT: Fix to be migrated
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum InterruptIndex {
     LegacyTimer = PIC_1_OFFSET,
     Keyboard, // 33
-    Reserved0,
+    Pic2,     // Secondary interrupt controller
     COM2,
     COM1,
     IRQ5, // 37
     FloppyController,
     MasterPicSpurious, // or parallel port interrupt
+
+    // Pic2
     RtcTimer,
     ACPI,
     ScsiNic1,
-    ScsiNic2,
+    Rtl8139,
     Mouse,
     MathCoProcessor,
     AtaChannel1,
     AtaChannel2,
+
+    // ??
     IRQ16,
     SlavePicSpurious,
     Timer = 0xe0,
@@ -44,8 +49,12 @@ impl InterruptIndex {
     pub fn as_usize(self) -> usize {
         usize::from(self.as_u8())
     }
+    //IMPORTAT: Fix to be migrated
     pub fn as_pic_enable_mask(self) -> u8 {
-        let diff = self.as_usize() - InterruptIndex::LegacyTimer.as_usize();
+        let mut diff = self.as_usize() - InterruptIndex::LegacyTimer.as_usize();
+        if diff > 7 {
+            diff -= 8;
+        }
         let mask = 0xff & !(1 << diff);
         mask as u8
     }
@@ -116,30 +125,35 @@ use crate::hlt_loop;
 use x86_64::structures::idt::PageFaultErrorCode;
 
 extern "x86-interrupt" fn page_fault_handler(
-    stack_frame: &mut InterruptStackFrame,
+    stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
 
+    let addr = Cr2::read();
     log::error!("EXCEPTION: PAGE FAULT");
-    log::error!("Accessed Address: {:?}", Cr2::read());
+    log::error!("Accessed Address: {:?}", addr);
     log::error!("Error Code: {:?}", error_code);
     log::error!("{:#?}", stack_frame);
+    unsafe {
+        use x86_64::addr::VirtAddr;
+        use crate::memory::*;
+        use x86_64::structures::paging::Translate;
+        let pagetable = init(VirtAddr::new(0));
+        //print_pagetable(&pagetable);
+        let res = pagetable.translate(addr);
+        log::info!("Mapped to: {:?}", res)
+    }
     hlt_loop();
 }
 
-pub extern "x86-interrupt" fn default_handler<const N: usize>(
-    stack_frame: &mut InterruptStackFrame,
-) {
+pub extern "x86-interrupt" fn default_handler<const N: usize>(stack_frame: InterruptStackFrame) {
     log::error!("EXECPTION: Default Interrupt Handler");
     log::error!("This interrupt has not been initialized: {}", N);
     panic!("{:?}", stack_frame);
 }
 
-extern "x86-interrupt" fn general_prot_handler(
-    stack_frame: &mut InterruptStackFrame,
-    error_code: u64,
-) {
+extern "x86-interrupt" fn general_prot_handler(stack_frame: InterruptStackFrame, error_code: u64) {
     log::error!("EXCEPTION: General Protection Exception");
     log::error!("Error Code: {:?}", error_code);
     log::error!("{:#?}", stack_frame);
@@ -147,10 +161,7 @@ extern "x86-interrupt" fn general_prot_handler(
 }
 
 // TODO: Enable alignment checking
-extern "x86-interrupt" fn alignment_handler(
-    stack_frame: &mut InterruptStackFrame,
-    error_code: u64,
-) {
+extern "x86-interrupt" fn alignment_handler(stack_frame: InterruptStackFrame, error_code: u64) {
     log::error!("EXCEPTION: Alignment Exception");
     log::error!("Error Code: {:?}", error_code);
     log::error!("{:#?}", stack_frame);
@@ -158,7 +169,7 @@ extern "x86-interrupt" fn alignment_handler(
 }
 
 // Keyboard handler
-extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: &mut InterruptStackFrame) {
+extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
     use spin::Mutex;
     use x86_64::instructions::port::Port;
@@ -199,25 +210,24 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: &mut Interrup
 }
 
 // Breakpoint handler
-extern "x86-interrupt" fn breakpoint_handler(stack_frame: &mut InterruptStackFrame) {
+extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     log::error!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
 }
 
 // Double fault handler
 extern "x86-interrupt" fn double_fault_handler(
-    stack_frame: &mut InterruptStackFrame,
+    stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
     panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
 }
 
-extern "x86-interrupt" fn invalid_op_handler(stack_frame: &mut InterruptStackFrame) {
+extern "x86-interrupt" fn invalid_op_handler(stack_frame: InterruptStackFrame) {
     panic!("INVALID OP HANDLER\n{:#?}", stack_frame);
 }
 
 // Serial handler
-extern "x86-interrupt" fn serial_handler(_stack_frame: &mut InterruptStackFrame) {
-
+extern "x86-interrupt" fn serial_handler(_stack_frame: InterruptStackFrame) {
     // Disable interrupts because we lock the SERIAL_WRITER here
     x86_64::instructions::interrupts::without_interrupts(|| {
         let data = [crate::serial::SERIAL_WRITER.lock().read(); 1];
@@ -232,7 +242,7 @@ extern "x86-interrupt" fn serial_handler(_stack_frame: &mut InterruptStackFrame)
 }
 
 // timer interrupt handler
-extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: &mut InterruptStackFrame) {
+extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     print!(".");
 
     // Renable interrupts again
@@ -241,7 +251,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: &mut InterruptSt
     }
 }
 
-extern "x86-interrupt" fn spurious_handler(_stack_frame: &mut InterruptStackFrame) {
+extern "x86-interrupt" fn spurious_handler(_stack_frame: InterruptStackFrame) {
     log::info!("SPURIOUS HANDLER");
 
     // Check if this is a pic8259_simple spurious interrupt or a legitimate interrupt
@@ -261,46 +271,43 @@ extern "x86-interrupt" fn spurious_handler(_stack_frame: &mut InterruptStackFram
  * Non populated cpu exceptions
  *
  */
-extern "x86-interrupt" fn debug_handler(stack_frame: &mut InterruptStackFrame) {
+extern "x86-interrupt" fn debug_handler(stack_frame: InterruptStackFrame) {
     log::info!("debug exception");
     panic!("{:?}", stack_frame);
 }
 
-extern "x86-interrupt" fn divide_error_handler(stack_frame: &mut InterruptStackFrame) {
+extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
     log::info!("divide error exception");
     panic!("{:?}", stack_frame);
 }
 
-extern "x86-interrupt" fn non_maskable_handler(stack_frame: &mut InterruptStackFrame) {
+extern "x86-interrupt" fn non_maskable_handler(stack_frame: InterruptStackFrame) {
     log::info!("non maskable interrupt exception");
     panic!("{:?}", stack_frame);
 }
 
-extern "x86-interrupt" fn overflow_handler(stack_frame: &mut InterruptStackFrame) {
+extern "x86-interrupt" fn overflow_handler(stack_frame: InterruptStackFrame) {
     log::error!("overflow exception");
     panic!("{:?}", stack_frame);
 }
 
-extern "x86-interrupt" fn bound_range_handler(stack_frame: &mut InterruptStackFrame) {
+extern "x86-interrupt" fn bound_range_handler(stack_frame: InterruptStackFrame) {
     log::error!("bound range exception");
     panic!("{:?}", stack_frame);
 }
 
-extern "x86-interrupt" fn device_not_available_handler(stack_frame: &mut InterruptStackFrame) {
+extern "x86-interrupt" fn device_not_available_handler(stack_frame: InterruptStackFrame) {
     log::error!("device not available exception");
     panic!("{:?}", stack_frame);
 }
 
-extern "x86-interrupt" fn invalid_tss_handler(
-    stack_frame: &mut InterruptStackFrame,
-    _error_code: u64,
-) {
+extern "x86-interrupt" fn invalid_tss_handler(stack_frame: InterruptStackFrame, _error_code: u64) {
     log::error!("invalid tss exception");
     panic!("{:?}", stack_frame);
 }
 
 extern "x86-interrupt" fn segment_not_present_handler(
-    stack_frame: &mut InterruptStackFrame,
+    stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) {
     log::error!("segment not present exception");
@@ -308,43 +315,36 @@ extern "x86-interrupt" fn segment_not_present_handler(
 }
 
 extern "x86-interrupt" fn stack_segment_handler(
-    stack_frame: &mut InterruptStackFrame,
+    stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) {
     log::error!("stack segment fault exception");
     panic!("{:?}", stack_frame);
 }
 
-extern "x86-interrupt" fn x87_floatingpoint_handler(stack_frame: &mut InterruptStackFrame) {
+extern "x86-interrupt" fn x87_floatingpoint_handler(stack_frame: InterruptStackFrame) {
     log::error!("x87_floatingpoint exception");
     panic!("{:?}", stack_frame);
 }
 
-extern "x86-interrupt" fn machine_check_handler(stack_frame: &mut InterruptStackFrame) -> ! {
+extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame) -> ! {
     log::error!("Machine check exception");
     panic!("{:?}", stack_frame);
 }
 
-extern "x86-interrupt" fn simd_floatingpoint_handler(stack_frame: &mut InterruptStackFrame) {
+extern "x86-interrupt" fn simd_floatingpoint_handler(stack_frame: InterruptStackFrame) {
     log::error!("Simd floatingpoint exception");
     panic!("{:?}", stack_frame);
 }
 
-extern "x86-interrupt" fn virtualization_handler(stack_frame: &mut InterruptStackFrame) {
+extern "x86-interrupt" fn virtualization_handler(stack_frame: InterruptStackFrame) {
     log::error!("virtualization exception");
     panic!("{:?}", stack_frame);
 }
 
-extern "x86-interrupt" fn security_handler(
-    stack_frame: &mut InterruptStackFrame,
-    _error_code: u64,
-) {
+extern "x86-interrupt" fn security_handler(stack_frame: InterruptStackFrame, _error_code: u64) {
     log::error!("security exception");
     panic!("{:?}", stack_frame);
 }
 
 // Executed on cargo test
-#[test_case]
-fn test_breakpoint_exception() {
-    x86_64::instructions::interrupts::int3();
-}

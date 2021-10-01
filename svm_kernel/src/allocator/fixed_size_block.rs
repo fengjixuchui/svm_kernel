@@ -1,4 +1,4 @@
-use super::{HEAP_SIZE};
+use super::HEAP_SIZE;
 use alloc::alloc::Layout;
 use core::convert::TryFrom;
 use core::ptr;
@@ -25,7 +25,7 @@ const ALLOC_STEPS: usize = 16;
 // TODO: Use a generic here?
 pub struct FixedSizeBlockAllocator {
     arr: [Option<u16>; HEAP_SIZE / ALLOC_STEPS],
-    heap_start: usize
+    heap_start: usize,
 }
 
 impl FixedSizeBlockAllocator {
@@ -42,6 +42,10 @@ impl FixedSizeBlockAllocator {
             log::debug!("{}: {:#?}, ", i, self.arr[i]);
         }
     }
+    pub fn print_stats(&self) {
+        log::debug!("==== FixedSizeBlockAllocator ====");
+        log::debug!("");
+    }
 
     unsafe fn dealloc(&mut self, ptr: *mut u8, _layout: &Layout) {
         let index = (ptr as usize - self.heap_start) / ALLOC_STEPS;
@@ -50,12 +54,12 @@ impl FixedSizeBlockAllocator {
             None => {
                 panic!("dealloced invalid ptr! {:#?}, index: {}", ptr, index);
             }
-            Some(i) => {
-                log::trace!(
-                    "dealloced {:#x} bytes at addr: {:#?}",
-                    i as usize * ALLOC_STEPS,
-                    ptr
-                );
+            Some(_i) => {
+                // log::trace!(
+                //     "dealloced {:#x} bytes at addr: {:#?}",
+                //     _i as usize * ALLOC_STEPS,
+                //     ptr
+                // );
                 self.arr[index] = None;
             }
         }
@@ -66,18 +70,18 @@ impl FixedSizeBlockAllocator {
         let mut accumulator = 0;
         let mut spot = 0;
 
-        log::trace!("Searching for size: {}", needed_size);
+        // log::trace!("Searching for size: {}", needed_size);
         // Iterate over arr
         let mut i = 0;
         while i < self.arr.len() {
-            log::trace!("i = {}, spot = {}", i, spot);
+            // log::trace!("i = {}, spot = {}", i, spot);
 
             // Check if mem used at this index
             // if so reset accumulator and skip next
             // values
             if let Some(offset) = self.arr[i] {
                 accumulator = 0;
-                log::trace!("offset by: {}", offset);
+                // log::trace!("offset by: {}", offset);
                 i += offset as usize;
                 spot = i;
                 continue;
@@ -91,12 +95,12 @@ impl FixedSizeBlockAllocator {
                         u16::try_from(needed_size / ALLOC_STEPS).expect("alloc size is too big");
                     self.arr[spot] = Some(arr_data);
                     let mem_ptr = spot * ALLOC_STEPS + self.heap_start;
-                    log::trace!(
-                        "alloc_ptr: {:#x}, size: {:#x}, spot: {}",
-                        mem_ptr,
-                        accumulator,
-                        spot
-                    );
+                    // log::trace!(
+                    //     "alloc_ptr: {:#x}, size: {:#x}, spot: {}",
+                    //     mem_ptr,
+                    //     accumulator,
+                    //     spot
+                    // );
                     return mem_ptr as *mut u8;
                 }
             }
@@ -145,14 +149,14 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
         let new_size = new_layout.size();
         let old_size = layout.align_to(ALLOC_STEPS).unwrap().pad_to_align().size();
 
-        log::trace!(
-            "realloc ptr: {:#?},
-            prev_size: {},
-            new_size: {}",
-            ptr,
-            old_size,
-            new_size,
-        );
+        // log::trace!(
+        //     "realloc ptr: {:#?},
+        //     prev_size: {},
+        //     new_size: {}",
+        //     ptr,
+        //     old_size,
+        //     new_size,
+        // );
 
         // Make buffer smaller
         if old_size > new_size {
@@ -177,7 +181,7 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
         // After aligning new_size to ALLOC_STEPS buffer remains at the same size
         } else {
             log::warn!("Called realloc with same size as previous buffer");
-            return ptr::null_mut();
+            return ptr;
         }
     }
 }

@@ -1,16 +1,15 @@
-
-use x86_64::VirtAddr;
-use x86_64::structures::tss::TaskStateSegment;
 use lazy_static::lazy_static;
+use x86_64::structures::tss::TaskStateSegment;
+use x86_64::VirtAddr;
 
 pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 pub const PAGE_FAULT_IST_INDEX: u16 = 1;
-
 
 /*
  * The TSS is an array that holds addresses to different stacks
  * Can be assigned to exception handlers
  */
+//TODO: Map stack with one unwritable page at the end
 lazy_static! {
     static ref TSS: TaskStateSegment = {
         let mut tss = TaskStateSegment::new();
@@ -18,7 +17,7 @@ lazy_static! {
              // We need the space because else println can
              // overflow the stack. If you enable sse and run
              // into triple faults try increasing this number
-            const STACK_SIZE: usize = 4096 * 5;
+            const STACK_SIZE: usize = 4096 * 10;
             static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
             let stack_start = VirtAddr::from_ptr(unsafe { &STACK });
@@ -30,7 +29,7 @@ lazy_static! {
              // We need the space because else println can
              // overflow the stack. If you enable sse and run
              // into triple faults try increasing this number
-            const STACK_SIZE: usize = 4096 * 5;
+            const STACK_SIZE: usize = 4096 * 10;
             static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
             let stack_start = VirtAddr::from_ptr(unsafe { &STACK });
@@ -42,8 +41,7 @@ lazy_static! {
     };
 }
 
-
-use x86_64::structures::gdt::{GlobalDescriptorTable, Descriptor, SegmentSelector};
+use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 
 struct Selectors {
     code_selector: SegmentSelector,
@@ -71,11 +69,11 @@ lazy_static! {
 }
 
 pub fn init() {
-    use x86_64::instructions::segmentation::set_cs;
+    use x86_64::instructions::segmentation::{Segment, CS};
     use x86_64::instructions::tables::load_tss;
     GDT.0.load();
     unsafe {
-        set_cs(GDT.1.code_selector); // Offset to kernel code segment
+        CS::set_reg(GDT.1.code_selector); // Offset to kernel code segment
         load_tss(GDT.1.tss_selector); // Offset to TSS entry
     }
 }

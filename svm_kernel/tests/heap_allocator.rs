@@ -6,7 +6,8 @@
 
 extern crate alloc;
 
-use bootloader::{entry_point, BootInfo};
+use bootloader::bootinfo::BootInfo;
+use bootloader::entry_point;
 use core::panic::PanicInfo;
 use svm_kernel::{
     allocator::HEAP_START, bench::black_box, bench::Bench, mylog::LOGGER, print, println,
@@ -15,11 +16,8 @@ use svm_kernel::{
 entry_point!(main);
 
 fn main(boot_info: &'static BootInfo) -> ! {
-    use svm_kernel::allocator;
-    use svm_kernel::memory::{self, BootInfoFrameAllocator};
-    use x86_64::VirtAddr;
     log::set_logger(&LOGGER).unwrap();
-    log::set_max_level(log::LevelFilter::Info);
+    log::set_max_level(log::LevelFilter::Debug);
 
     svm_kernel::init(boot_info);
     println!("===== heap_allocator test =====");
@@ -147,9 +145,10 @@ fn realloc_copy_shrink() {
 fn heap_full_alloc() {
     unsafe {
         let mut bench = Bench::start();
-        let layout = Layout::array::<u8>(HEAP_SIZE).unwrap();
+        let layout = Layout::array::<u8>(HEAP_SIZE - 512).unwrap();
         let ptr = black_box(alloc(layout));
 
+        log::info!("ptr: {:x?}", ptr);
         // let failed_layout = Layout::array::<u8>(1).unwrap();
         // let failed_ptr = alloc(failed_layout);
         // assert_eq!(failed_ptr, core::ptr::null_mut());
@@ -202,6 +201,7 @@ fn many_boxes() {
     bench.end();
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 struct Test0 {
     typ: u8,
@@ -210,7 +210,7 @@ struct Test0 {
     id: u8,
     flags: u32,
 }
-
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 struct Test1 {
     typ: u8,
@@ -220,7 +220,7 @@ struct Test1 {
     mapped_to: u32,
     flags: u16,
 }
-
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 struct Test2 {
     typ: u8,
@@ -233,7 +233,6 @@ struct Test2 {
 
 #[test_case]
 fn multiple_vecs() {
-
     let mut bench = Bench::start();
     let mut vec0 = Vec::new();
     let mut vec1 = Vec::new();
@@ -252,7 +251,7 @@ fn multiple_vecs() {
         bus: 0,
         source: 0,
         mapped_to: 2,
-        flags: 0xff
+        flags: 0xff,
     };
     let test2 = Test2 {
         typ: 2,
@@ -260,7 +259,7 @@ fn multiple_vecs() {
         id: 1,
         res0: 0,
         address: 0xbaab,
-        interrupt_base: 0xc
+        interrupt_base: 0xc,
     };
 
     vec0.push(test0);
@@ -273,5 +272,3 @@ fn multiple_vecs() {
 
     bench.end();
 }
-
-

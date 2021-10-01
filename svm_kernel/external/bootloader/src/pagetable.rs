@@ -1,12 +1,11 @@
 use bitflags::bitflags;
-use core::convert::TryFrom;
 use core::convert::TryInto;
 use core::fmt;
 use core::ops::{Index, IndexMut};
-use x86::structures::paging::frame::PhysFrame;
 use x86::structures::paging::page::{PageSize, Size4KiB};
-use x86::structures::paging::page_table::FrameError;
-use x86::PhysAddr;
+use core::ptr::addr_of;
+use core::ptr::read_unaligned;
+// use x86::PhysAddr;
 
 /// The number of entries in a page table.
 const ENTRY_COUNT: usize = 512;
@@ -33,33 +32,15 @@ impl PageTableEntry {
 
     /// Returns the physical address mapped by this entry, might be zero.
     #[inline]
-    pub fn addr(&self) -> PhysAddr {
-        PhysAddr::new(u32::try_from(self.entry).unwrap())
+    pub fn addr(&self) -> u64 {
+        self.entry & 0x000f_ffff_ffff_f000
     }
 
     /// Map the entry to the specified physical address with the specified flags.
     #[inline]
-    pub fn set_addr(&mut self, addr: PhysAddr, flags: PageTableFlags) {
-        assert!(addr.is_aligned(Size4KiB::SIZE));
-        self.entry = (addr.as_u32() as u64) | flags.bits();
-    }
-
-    /// Returns the physical frame mapped by this entry.
-    ///
-    /// Returns the following errors:
-    ///
-    /// - `FrameError::FrameNotPresent` if the entry doesn't have the `PRESENT` flag set.
-    /// - `FrameError::HugeFrame` if the entry has the `HUGE_PAGE` flag set (for huge pages the
-    ///    `addr` function must be used)
-    #[inline]
-    pub fn frame(&self) -> Result<PhysFrame, FrameError> {
-        if !self.flags().contains(PageTableFlags::PRESENT) {
-            Err(FrameError::FrameNotPresent)
-        } else if self.flags().contains(PageTableFlags::HUGE_PAGE) {
-            Err(FrameError::HugeFrame)
-        } else {
-            Ok(PhysFrame::containing_address(self.addr()))
-        }
+    pub fn set_addr(&mut self, addr: u64, flags: PageTableFlags) {
+        assert!(addr % Size4KiB::SIZE as u64 == 0);
+        self.entry = (addr as u64) | flags.bits();
     }
 
     /// Returns whether this entry is zero.
@@ -77,14 +58,14 @@ impl PageTableEntry {
     /// Sets the flags of this entry.
     #[inline]
     pub fn set_flags(&mut self, flags: PageTableFlags) {
-        self.entry = self.addr().as_u32() as u64 | flags.bits();
+        self.entry = self.addr() | flags.bits();
     }
 }
 
 impl fmt::Debug for PageTableEntry {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut f = f.debug_struct("PageTableEntry");
-        f.field("addr", &self.entry);
+        f.field("addr", &self.addr());
         f.field("flags", &self.flags());
         f.finish()
     }
@@ -290,7 +271,7 @@ use crate::bootinfo::{FrameRange, MemoryMap, MemoryRegion, MemoryRegionType};
 #[derive(Debug)]
 pub struct BootInfoFrameAllocator {
     memory_map: &'static MemoryMap,
-    next: usize,
+    //next: usize, TODO: Do I really not need this?
 }
 
 impl BootInfoFrameAllocator {
@@ -302,25 +283,24 @@ impl BootInfoFrameAllocator {
     pub unsafe fn new(memory_map: &'static MemoryMap) -> Self {
         BootInfoFrameAllocator {
             memory_map,
-            next: 0,
+            //next: 0,
         }
     }
 
     /// Returns an iterator over the usable frames specified in the memory map.
-    pub fn usable_2m_frames(&self, phys_mem_offset: u64) -> impl Iterator<Item = u64> {
-        log::info!("phys_mem_offset: {:#x}", phys_mem_offset);
+    pub fn usable_xsize_frames(&self, xsize: u64, alignment: u64) -> impl Iterator<Item = u64> {
+        if alignment % 4096 != 0 {
+            panic!("alignment needs to be multiple of 4096");
+        }
+
         // get usable regions from memory map
         let regions = self.memory_map.iter();
-        let usable_regions = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
+        let usable_regions =
+            unsafe { regions.filter(|r| read_unaligned(addr_of!(r.region_type)) == MemoryRegionType::Usable) };
 
-        // Filter out regions smaller then 2Mb
-        let adjusted_regions = usable_regions.filter(move |r| {
-            r.range.size() >= crate::TWO_MEG
-        });
-
-        // Reduce frame range to fit into 2Mb pages
-        let adjusted_regions = adjusted_regions.map(|r| {
-            let diff = r.range.size() % crate::TWO_MEG;
+        // Reduce the end of frame range to fit into alignment
+        let adjusted_regions = usable_regions.map(move |r| {
+            let diff = r.range.size() % xsize;
             if diff != 0 {
                 let new = r.range.end_addr() - diff;
                 return MemoryRegion {
@@ -331,9 +311,14 @@ impl BootInfoFrameAllocator {
             *r
         });
 
+        // Increase the start of frame range to fit into alignment
         let adjusted_regions = adjusted_regions.map(move |r| {
-            if r.range.start_addr() < phys_mem_offset {
-                let new = r.range.start_addr() + (phys_mem_offset - r.range.start_addr());
+            let rest = r.range.start_addr() % alignment;
+            if rest != 0 {
+                let new = r.range.start_addr() + (alignment - rest);
+                if new > r.range.end_addr() {
+                    return MemoryRegion::empty();
+                }
                 return MemoryRegion {
                     range: FrameRange::new(new, r.range.end_addr()),
                     region_type: r.region_type,
@@ -342,11 +327,13 @@ impl BootInfoFrameAllocator {
             r
         });
 
+        // Filter out regions smaller then xsize
+        let adjusted_regions = adjusted_regions.filter(move |r| r.range.size() >= xsize);
+
         // map each region to its address range
         let addr_ranges = adjusted_regions.map(|r| r.range.start_addr()..r.range.end_addr());
         // transform to an iterator of frame start addresses
-        let frame_addresses =
-            addr_ranges.flat_map(move |r| r.step_by(crate::TWO_MEG.try_into().unwrap()));
+        let frame_addresses = addr_ranges.flat_map(move |r| r.step_by(xsize.try_into().unwrap()));
         frame_addresses
     }
 }
@@ -372,10 +359,11 @@ impl Iterator for PdeAllocator {
 
     fn next(&mut self) -> Option<&'static mut PageTable> {
         let addr = self.p2_start_addr + core::mem::size_of::<PageTable>() * self.index;
-        if addr > self.p2_end_addr {
+        let layout = core::alloc::Layout::from_size_align(addr, 16).unwrap();
+        if layout.size() > self.p2_end_addr {
             return None;
         }
-        let p2_table = unsafe { &mut *(addr as *mut PageTable) };
+        let p2_table = unsafe { &mut *(layout.size() as *mut PageTable) };
         self.index += 1;
         Some(p2_table)
     }

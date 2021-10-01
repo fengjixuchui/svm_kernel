@@ -1,10 +1,12 @@
 use crate::println;
-use core::arch::x86_64::{__cpuid};
-use crate::time::{rdtsc, elapsed};
+use crate::time::{elapsed, rdtsc};
+use core::arch::x86_64::__cpuid;
 
 pub enum CpuidIndex {
     TscInvariant = 0x8000_0007,
-    Rdtscp       = 0x8000_0001
+    Rdtscp = 0x8000_0001,
+    TLBInfo = 0x8000_0005,
+    TLBInfo1GbPages = 0x8000_0019,
 }
 
 impl CpuidIndex {
@@ -19,7 +21,7 @@ pub struct Bench {
 
 impl Bench {
     pub fn start() -> Self {
-        Bench { start: rdtsc()}
+        Bench { start: rdtsc() }
     }
 
     pub fn end(&mut self) {
@@ -36,36 +38,42 @@ pub fn overflow() {
         asm!("mov {}, rsp", out(reg) x);
     }
     log::info!("Stack ptr: {:#x}", x);
-    black_box(a);
+    core::hint::black_box(a);
     overflow();
 }
 
-/// A function that is opaque to the optimizer, to allow benchmarks to
-/// pretend to use outputs to assist in avoiding dead-code
-/// elimination.
-///
-/// This function is a no-op, and does not even read from `dummy`.
-pub fn black_box<T>(dummy: T) -> T {
-    // we need to "use" the argument in some way LLVM can't
-    // introspect.
-    unsafe {asm!("/* {0} */" , in(reg) &dummy)}
-    dummy
+pub fn max_num_4kib_pages() -> u8 {
+    let res = unsafe { __cpuid(CpuidIndex::TLBInfo.as_u32()) };
+    return ((res.ebx & (0xff << 16)) >> 16) as u8;
 }
 
+pub fn max_num_2mib_pages() -> u8 {
+    let res = unsafe { __cpuid(CpuidIndex::TLBInfo.as_u32()) };
+    return ((res.eax & (0xff << 16)) >> 16) as u8;
+}
 
+pub fn max_num_1gib_pages() -> u16 {
+    let res = unsafe { __cpuid(CpuidIndex::TLBInfo1GbPages.as_u32()) };
+    return ((res.eax & (0xfff << 16)) >> 16) as u16;
+}
 
 pub fn check_support() {
     let res = unsafe { __cpuid(CpuidIndex::TscInvariant.as_u32()) };
 
     let tsc_invariant = res.edx & (1 << 8);
+
     if tsc_invariant == 0 {
         log::warn!("rtdsc does not increment at a fixed rate");
     }
 
-    let res = unsafe { __cpuid( CpuidIndex::Rdtscp.as_u32()) };
+    let res = unsafe { __cpuid(CpuidIndex::Rdtscp.as_u32()) };
     if res.edx == 0 {
         panic!("Rdtscp instruction is not supported");
     }
+
+    log::info!("max num 1Gib pages: {}", max_num_1gib_pages());
+    log::info!("max num 2Mib pages: {}", max_num_2mib_pages());
+    log::info!("max num 4Kib pages: {}", max_num_4kib_pages());
 }
 
 // TODO: When threading is implemented add a counter where execution time is spent most of the time

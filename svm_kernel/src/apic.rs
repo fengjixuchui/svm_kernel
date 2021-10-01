@@ -6,7 +6,9 @@ use crate::interrupts::InterruptIndex;
 use crate::interrupts::PICS;
 use core::ptr::{read_volatile, write_volatile};
 use x86_64::registers::model_specific::Msr;
-use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, Size4KiB};
+use x86_64::structures::paging::page_table::PageTableFlags;
+use x86_64::structures::paging::{FrameAllocator, OffsetPageTable, PhysFrame, Size4KiB};
+use x86_64::PhysAddr;
 
 // Other constants
 const APIC_BASE: u64 = 0x0_0000_FEE0_0000;
@@ -34,10 +36,7 @@ impl Apic {
         return self.bsp.unwrap();
     }
 
-    pub unsafe fn mp_init(&self, apic_id: u8, trampoline: unsafe extern "C" fn() -> !,
-        ) {
-
-        log::info!("Trampoline ptr: {:?}", trampoline);
+    pub unsafe fn mp_init(&self, apic_id: u8, trampoline: u32) {
         log::info!("Booting core {}", apic_id);
         // Send INIT ipi
         let low = InterCmdRegLow::new()
@@ -65,7 +64,11 @@ impl Apic {
         // Convert trampoline func pointer to u8
         let to_vec = (trampoline >> 12) as u8;
 
-        // // Send STARTUP ipi
+        if to_vec >= 0xA0 && to_vec <= 0xBF {
+            panic!("Trampoline vector can't use 0xA0-0xBF. Reserved by spec.");
+        }
+
+        // Send STARTUP ipi
         let low = InterCmdRegLow::new()
             .with_vec(to_vec) // Core execute code at 0x000VV000
             .with_trigger_mode(0) // level-sensitive
@@ -106,14 +109,18 @@ impl Apic {
         return feature != 0;
     }
 
+    // IMPORTANT: Fix to be migrated
     unsafe fn init_chained_pics(&self, acpi: &Acpi) {
         PICS.lock().initialize();
         if !acpi.mask_pics {
-            log::info!("Virtual wire mode is active");
+            // log::info!("Virtual wire mode is active");
             let keyboard_enable = InterruptIndex::Keyboard.as_pic_enable_mask();
             let serial_enable = InterruptIndex::COM1.as_pic_enable_mask()
                 & InterruptIndex::COM2.as_pic_enable_mask();
-            PICS.lock().mask(keyboard_enable & serial_enable, 0xff);
+            let pic2 = InterruptIndex::Pic2.as_pic_enable_mask();
+            PICS.lock()
+                .mask(keyboard_enable & serial_enable & pic2, 0xff);
+            // PICS.lock().mask(0, 0);
         } else {
             use x86_64::instructions::port::Port;
             let mut imcr_low: Port<u8> = Port::new(0x22);
@@ -136,9 +143,15 @@ impl Apic {
             panic!("Apic is not available");
         }
 
+        let frame = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(APIC_BASE));
         // Map page for apic base address
-        crate::memory::id_map_nocache(mapper, frame_allocator, x86_64::PhysAddr::new(APIC_BASE))
-            .unwrap();
+        crate::memory::id_map_nocache(
+            mapper,
+            frame_allocator,
+            frame,
+            Some(PageTableFlags::WRITABLE),
+        )
+        .unwrap();
 
         // Enable apic by writing MSR base reg
         let mut apic_base_reg = Msr::new(0x0000_001B);
@@ -233,7 +246,7 @@ pub unsafe fn end_of_interrupt() {
     write_apic(Register::EndOfInterrupt, 0);
 }
 
-pub fn msr_is_bsp() -> bool{
+pub fn msr_is_bsp() -> bool {
     let apic_base_reg = Msr::new(0x0000_001B);
     unsafe {
         let base_reg = ApicBaseReg::from_bytes(apic_base_reg.read().to_le_bytes());
@@ -242,10 +255,8 @@ pub fn msr_is_bsp() -> bool{
 }
 
 pub fn local_apic_id() -> u8 {
-    use core::arch::x86_64::{__cpuid};
-    let res = unsafe {
-        __cpuid(0x0000_0001)
-    };
+    use core::arch::x86_64::__cpuid;
+    let res = unsafe { __cpuid(0x0000_0001) };
 
     return (res.ebx >> 24) as u8;
 }

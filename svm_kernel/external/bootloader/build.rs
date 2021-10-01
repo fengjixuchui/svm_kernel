@@ -27,6 +27,8 @@ fn main() {
         }
     });
 
+    eprintln!("Original kernel path: {:#?}", kernel.clone());
+
     let kernel_file_name = kernel
         .file_name()
         .expect("KERNEL has no valid file name")
@@ -36,7 +38,7 @@ fn main() {
     // check that the kernel file exists
     assert!(
         kernel.exists(),
-        format!("KERNEL does not exist: {}", kernel.display())
+        "KERNEL does not exist: {}", kernel.display()
     );
 
     // get access to llvm tools shipped in the llvm-tools-preview rustup component
@@ -76,12 +78,14 @@ fn main() {
     // Strip debug symbols from kernel for faster loading
     let stripped_kernel_file_name = format!("kernel_stripped-{}", kernel_file_name);
     let stripped_kernel = out_dir.join(&stripped_kernel_file_name);
+    // use std::path::Path;
+    // std::fs::copy(&Path::new(&kernel), &Path::new(&stripped_kernel)).unwrap();
     let objcopy = llvm_tools
         .tool(&llvm_tools::exe("llvm-objcopy"))
         .expect("llvm-objcopy not found in llvm-tools");
     {
         let mut cmd = Command::new(&objcopy);
-        cmd.arg("--strip-all");
+        cmd.arg("--strip-debug");
         cmd.arg(&kernel);
         cmd.arg(&stripped_kernel);
         let exit_status = cmd
@@ -170,25 +174,6 @@ fn main() {
 
 #[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
-struct Elf32Header {
-    e_ident: [u8; 16],
-    e_type: u16,
-    e_machine: u16,
-    e_version: u32,
-    e_entry: u32,
-    e_phoff: u32,
-    e_shoff: u32,
-    e_flags: u32,
-    e_ehsize: u16,
-    e_phentsize: u16,
-    e_phnum: u16,
-    e_shentsize: u16,
-    e_shnum: u16,
-    e_shstrndx: u16,
-}
-
-#[derive(Clone, Copy, Debug)]
-#[repr(C, packed)]
 struct Elf64Header {
     e_ident: [u8; 16],
     e_type: u16,
@@ -234,23 +219,101 @@ struct Elf64_Phdr {
     p_align: u64,
 }
 
+use core::ptr::addr_of;
+use core::ptr::read_unaligned;
 impl Ord for Elf64_Phdr {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        unsafe { self.p_vaddr.cmp(&other.p_vaddr) }
+        unsafe { 
+            let x = read_unaligned(addr_of!(other.p_vaddr));
+            read_unaligned(addr_of!(self.p_vaddr)).cmp(&x) }
     }
 }
 
 use std::fmt;
+impl fmt::Display for Elf64_Shdr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        unsafe {
+            writeln!(f, "\nsh_addr: {:#x}", read_unaligned(addr_of!(self.sh_addr)))?;
+            writeln!(f, "sh_offset: {:#x}", read_unaligned(addr_of!(self.sh_offset)))?;
+            writeln!(f, "sh_size: {:#x}", read_unaligned(addr_of!(self.sh_size)))
+        }
+    }
+}
 impl fmt::Display for Elf64_Phdr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unsafe { write!(f, "Virtual Address: {:#x}", self.p_vaddr) }
+        unsafe { write!(f, "Virtual Address: {:#x}", read_unaligned(addr_of!(self.p_vaddr))) }
     }
 }
 
 impl fmt::Debug for Elf64_Phdr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unsafe { write!(f, "Virtual Address: {:#x}", self.p_vaddr) }
+        unsafe { write!(f, "Virtual Address: {:#x}", read_unaligned(addr_of!(self.p_vaddr))) }
     }
+}
+
+#[cfg(feature = "binary")]
+fn apply_type<T: Sized>(offset: u64, num_types: u64, buf: &[u8]) -> Result<&[T], ApplyTypeError> {
+    use std::convert::TryFrom;
+    use ApplyTypeError::*;
+    let type_size: usize = std::mem::size_of::<T>();
+    let offset = usize::try_from(offset).map_err(|_| UsizeTransform)?;
+    let num_types = usize::try_from(num_types).map_err(|_| UsizeTransform)?;
+    let s = &buf[offset..offset + type_size * num_types];
+    let (prefix, headers, suffix) = unsafe { s.align_to::<T>() };
+    if !prefix.is_empty() || !suffix.is_empty() {
+        return Err(MisalignedRead(std::any::type_name::<T>()));
+    }
+    Ok(headers)
+}
+
+#[cfg(feature = "binary")]
+fn apply_type_mut<T: Sized>(
+    offset: u64,
+    num_types: u64,
+    buf: &mut [u8],
+) -> Result<&mut [T], ApplyTypeError> {
+    use std::convert::TryFrom;
+    use ApplyTypeError::*;
+    let type_size: usize = std::mem::size_of::<T>();
+    let offset = usize::try_from(offset).map_err(|_| UsizeTransform)?;
+    let num_types = usize::try_from(num_types).map_err(|_| UsizeTransform)?;
+    let s = &mut buf[offset..offset + type_size * num_types];
+    let (prefix, headers, suffix) = unsafe { s.align_to_mut::<T>() };
+    if !prefix.is_empty() || !suffix.is_empty() {
+        return Err(MisalignedRead(std::any::type_name::<T>()));
+    }
+    Ok(headers)
+}
+
+#[cfg(feature = "binary")]
+fn addr_to_seg_map(addr: u64, segments: &Vec<Elf64_Phdr>) -> Option<usize> {
+    for (i, seg) in segments.iter().enumerate() {
+        let low_bar = seg.p_offset;
+        let high_bar = seg.p_offset + seg.p_memsz;
+        if addr >= low_bar && addr < high_bar {
+            return Some(i);
+        }
+        // eprintln!(
+        //     "addr({:#x}) >= low_bar({:#x}) = {}",
+        //     addr,
+        //     low_bar,
+        //     addr >= low_bar
+        // );
+        // eprintln!(
+        //     "&& addr({:#x})  < high_bar({:#x}) = {}",
+        //     addr,
+        //     high_bar,
+        //     addr < high_bar
+        // );
+    }
+    None
+}
+
+#[cfg(feature = "binary")]
+#[derive(Debug)]
+enum ApplyTypeError {
+    UsizeTransform,
+    MisalignedRead(&'static str),
 }
 
 /*
@@ -259,8 +322,13 @@ impl fmt::Debug for Elf64_Phdr {
  */
 #[cfg(feature = "binary")]
 fn pad_kernel(kernel: &std::path::PathBuf) {
-    use std::convert::{TryFrom, TryInto};
+    use std::convert::TryFrom;
     use std::io::{Read, Seek, Write};
+
+    eprintln!(
+        "Padding kernel file: {:#?}",
+        kernel.clone().into_os_string()
+    );
 
     // Read file to vec
     let mut buf = Vec::<u8>::new();
@@ -276,11 +344,11 @@ fn pad_kernel(kernel: &std::path::PathBuf) {
     /*
      * Parse ELF header
      */
-    let header;
+    let mut header;
     {
-        const HEADER_SIZE: usize = std::mem::size_of::<Elf64Header>();
-        let header_buf: [u8; HEADER_SIZE] = buf[..HEADER_SIZE].try_into().expect("Failed try into");
-        header = unsafe { std::mem::transmute::<&[u8; HEADER_SIZE], &Elf64Header>(&header_buf) };
+        let headers = apply_type::<Elf64Header>(0, 1, &buf).unwrap();
+        header = headers[0].clone();
+
         let magic = [
             0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00,
@@ -302,71 +370,20 @@ fn pad_kernel(kernel: &std::path::PathBuf) {
     }
 
     /*
-     * Parse section header and zero .bss section
+     * Parse program header and save load segments in vec
      */
+    let mut segments = Vec::<Elf64_Phdr>::new();
+    let mut load_segments = Vec::<Elf64_Phdr>::new();
     {
-        const SHEADER_SIZE: usize = std::mem::size_of::<Elf64_Shdr>();
+        let pheaders =
+            apply_type::<Elf64_Phdr>(header.e_phoff, header.e_phnum.into(), &buf).unwrap();
 
-        let mut bss_sec = None;
-        {
-            let s = &buf[header.e_shoff as usize
-                ..header.e_shoff as usize + SHEADER_SIZE * header.e_shnum as usize];
-
-            let (prefix, sections, suffix) = unsafe { s.align_to::<Elf64_Shdr>() };
-            if !prefix.is_empty() || !suffix.is_empty() {
-                panic!("Misaligned sheader read");
-            }
-
-            let str_table_sec = sections[header.e_shstrndx as usize];
-            let offset = str_table_sec.sh_offset as usize;
-            let str_table = &buf[offset..offset + str_table_sec.sh_size as usize];
-            for section in sections {
-                let name = core::str::from_utf8(
-                    &str_table[section.sh_name as usize..]
-                        .split(|&c|{  c == 0})
-                        .next().unwrap(),
-                )
-                .unwrap();
-                if name == ".bss" {
-                    bss_sec = Some(section.clone());
-                }
-            }
-        }
-
-        if let Some(section) = bss_sec {
-            let offset = section.sh_offset as usize;
-            let bss = &mut buf[offset..offset+section.sh_size as usize];
-            for i in bss {
-                *i = 0;
-            }
-        }else{
-            panic!("Kernel does not have a .bss section");
-        }
-    }
-
-    /*
-     * Parse program header and start padding segments
-     */
-    const PHEADER_SIZE: usize = std::mem::size_of::<Elf64_Phdr>();
-    let mut load_segments = Vec::new();
-    {
-        let phoff = header.e_phoff.try_into().unwrap();
-        let mut header_buf: [u8; PHEADER_SIZE] =
-            buf[phoff..phoff + PHEADER_SIZE].try_into().unwrap();
-        let pheader =
-            unsafe { std::mem::transmute::<&[u8; PHEADER_SIZE], &Elf64_Phdr>(&header_buf) };
-
-        let mut i = 0;
-        #[allow(unused_assignments)]
-        while i < header.e_phnum.into() {
-            let window = phoff + PHEADER_SIZE * i;
-            header_buf = buf[window..window + PHEADER_SIZE].try_into().unwrap();
-
+        for pheader in pheaders {
+            // LOAD Segment
+            segments.push(pheader.clone());
             if pheader.p_type == 1 {
-                // LOAD Segment
                 load_segments.push(pheader.clone());
             }
-            i += 1;
         }
         load_segments.sort();
 
@@ -382,85 +399,215 @@ fn pad_kernel(kernel: &std::path::PathBuf) {
         }
 
         // Check that program header is included in first LOAD segment
-        if load_segments.len() > 1 && load_segments[1].p_offset < header.e_phoff {
+        if load_segments.iter().count() > 1
+            && load_segments.iter().nth(1).unwrap().p_offset <= header.e_phoff
+        {
             unsafe {
                 eprintln!("Programm header comes after LOAD2 segment. This is not supported.");
-                eprintln!("Program header addr: {:#x}", header.e_phoff);
-                eprintln!("LOAD2 offset: {:#x}", load_segments[0].p_offset);
+                eprintln!("Program header addr: {:#x}", read_unaligned(addr_of!(header.e_phoff)));
+                eprintln!(
+                    "LOAD2 offset: {:#x}",
+                    read_unaligned(addr_of!(load_segments.iter().nth(0).unwrap().p_offset))
+                );
             }
             std::process::exit(1);
         }
 
-        // Check that first load segment has virtual address 0x200000
-        if load_segments.first().unwrap().p_vaddr != 0x200000 {
-            panic!("Base address (first load segment) has to be 0x200000 = 2Mb");
-        }
+        unsafe {
+            // Check that first load segment has virtual address 0x200000
+            if read_unaligned(addr_of!(load_segments.iter().nth(0).unwrap().p_vaddr)) != 0x200000 {
+                panic!("Base address (first load segment) has to be 0x200000 = 2Mb");
+            }
+      }
     }
 
     // Pad load segments with zeros
-    let mut already_padded: usize = 0;
-    for (i, (seg, seg_next)) in load_segments
+    let mut already_padded_vec: Vec<usize> = Vec::new();
+    for (_i, (seg, seg_next)) in load_segments
         .iter()
         .zip(load_segments.iter().skip(1))
         .enumerate()
     {
-        let vdiff = (isize::try_from(seg_next.p_vaddr).unwrap())
-            .checked_sub(isize::try_from(seg.p_vaddr).unwrap())
+        let already_padded: usize = already_padded_vec.iter().sum();
+        let vdiff = usize::try_from(
+            std::cmp::max(seg.p_vaddr, seg_next.p_vaddr)
+                - std::cmp::min(seg.p_vaddr, seg_next.p_vaddr),
+        )
+        .unwrap();
+
+        let mut pad_size = vdiff
+            .checked_sub(usize::try_from(seg.p_filesz).unwrap())
             .unwrap();
-        let mut pad_size =
-            usize::try_from((vdiff - isize::try_from(seg.p_filesz).unwrap()).abs()).unwrap();
-        eprintln!("Pad size: {:#x}", pad_size);
 
         // Often times segments have spaces in between each other that do not belong to any segment
         // These spaces have to be subtracted from the padding
-        let sub_align =
-            seg_next.p_offset as isize - (seg.p_filesz as isize + seg.p_offset as isize);
-        unsafe {
-            eprintln!(
-                "LOAD{}: In file align: {:#x} next segment offset: {:#x}",
-                i,
-                seg_next.p_offset,
-                seg.p_filesz as isize + seg.p_offset as isize
-            );
-        }
-        eprintln!("Subtract align: {:#x}", sub_align.abs());
-        pad_size -= sub_align.abs() as usize;
+        let a = seg.p_filesz + seg.p_offset;
+        let b = seg_next.p_offset;
+        let sub_align = usize::try_from(std::cmp::max(a, b) - std::cmp::min(a, b)).unwrap();
+
+        pad_size -= sub_align;
 
         let index: usize = usize::try_from(seg.p_offset).unwrap()
             + usize::try_from(seg.p_filesz).unwrap()
             + already_padded
             + 1;
-        eprintln!("Padding from: {:#x} to {:#x}", index, index + pad_size);
 
-        for _ in 0..pad_size {
-            buf.insert(index, 0); // TODO: Make more efficient
-        }
-
-        // Update program header with new file size etc.
-        let p = &mut buf[header.e_phoff as usize
-            ..header.e_phoff as usize + PHEADER_SIZE * header.e_phnum as usize];
-
-        let p_iter = p.chunks_mut(PHEADER_SIZE);
-
-        for i in p_iter {
-            let (prefix, pheaders, suffix) = unsafe { i.align_to_mut::<Elf64_Phdr>() };
-            let pheader = &mut pheaders[0];
-            if !prefix.is_empty() || !suffix.is_empty() {
-                panic!("Misaligned pheader read");
-            }
-            if pheader.p_offset == seg.p_offset {
-                let pad_size = u64::try_from(pad_size).unwrap();
-                pheader.p_filesz += pad_size;
-                pheader.p_memsz += pad_size;
-                pheader.p_offset += u64::try_from(already_padded).unwrap();
-            }
-        }
-
+        let zero = std::iter::repeat(0).take(pad_size);
+        buf.splice(index..index, zero);
+        // for _ in 0..pad_size {
+        //     buf.insert(index, 0); // TODO: Make more efficient
+        // }
         // Sum of all applied pad sizes
-        already_padded += pad_size;
+        already_padded_vec.push(pad_size);
     }
 
-    println!("cargo:warning=Total padding: {:#x}", already_padded);
+    // Pad last load segment too
+    {
+        let last = load_segments.last().unwrap();
+        let pad_size = usize::try_from(last.p_memsz - last.p_filesz).unwrap();
+        let already_padded: usize = already_padded_vec.iter().sum();
+        let index: usize = usize::try_from(last.p_offset).unwrap()
+            + usize::try_from(last.p_filesz).unwrap()
+            + already_padded;
+
+        eprintln!("Padding last load segment by: {:#x} bytes", pad_size);
+
+        let zero = std::iter::repeat(0).take(pad_size);
+        buf.splice(index..index, zero);
+        // for _ in 0..pad_size {
+        //     buf.insert(index, 0); // TODO: Make more efficient
+        // }
+
+        already_padded_vec.push(pad_size);
+    }
+
+    // Update program header with new file size etc.
+    {
+        let pheaders =
+            apply_type_mut::<Elf64_Phdr>(header.e_phoff, header.e_phnum.into(), &mut buf).unwrap();
+
+        for pheader in pheaders {
+            if pheader.p_type == 1 {
+                let idx = addr_to_seg_map(pheader.p_offset, &load_segments).unwrap();
+                let seg = &load_segments[idx];
+                let pad_size = already_padded_vec[idx];
+                let already_padded = already_padded_vec[..idx].iter().sum::<usize>();
+
+                if pheader.p_offset == seg.p_offset {
+                    let pad_size = u64::try_from(pad_size).unwrap();
+                    pheader.p_filesz += pad_size;
+                    pheader.p_memsz += pad_size;
+                    pheader.p_offset += u64::try_from(already_padded).unwrap();
+                }
+            }
+        }
+    }
+
+    // Update header offsets
+    {
+        let headers = apply_type_mut::<Elf64Header>(0, 1, &mut buf).unwrap();
+        let header_ref = &mut headers[0];
+
+        let last_seg = load_segments.last().unwrap();
+        if header_ref.e_shoff < last_seg.p_offset + last_seg.p_filesz {
+            unsafe {
+                eprintln!(
+                    "Section header offset: {:#x} last segment: {:#x}",
+                    read_unaligned(addr_of!(header_ref.e_shoff)),
+                    last_seg.p_offset + last_seg.p_filesz
+                );
+            }
+            panic!("Section header table is not at the end of ELF file.");
+        }
+        header_ref.e_shoff += already_padded_vec.iter().sum::<usize>() as u64;
+
+        // Update header clone
+        header = header_ref.clone();
+    }
+
+    // Update section offsets
+    {
+        let sections =
+            apply_type_mut::<Elf64_Shdr>(header.e_shoff, header.e_shnum.into(), &mut buf).unwrap();
+
+        for section in sections {
+            // If section does not map to load_segment what should we do?
+            let idx = if let Some(idx) = addr_to_seg_map(section.sh_offset, &load_segments) {
+                idx
+            } else {
+                // Assume that it is at the end of the file
+                eprintln!("Section: {:#x?}", section);
+                eprintln!("Section does not map to load segment");
+                if section.sh_offset > load_segments.last().unwrap().p_offset {
+                    load_segments.len() - 1
+                } else {
+                    panic!(
+                        "Section is before last load segment but does not map to any load segment"
+                    );
+                }
+            };
+            let already_padded = already_padded_vec[..idx].iter().sum::<usize>();
+
+            section.sh_offset += already_padded as u64;
+
+            // Edge case: If section behind last load segment
+            let last = load_segments.last().unwrap();
+            if section.sh_offset > last.p_offset + last.p_filesz {
+                section.sh_offset += *already_padded_vec.last().unwrap() as u64;
+            }
+        }
+    }
+
+    /*
+     * Parse section header and zero .bss section
+     */
+    {
+        let mut bss_sec = None;
+        {
+            let sections =
+                apply_type::<Elf64_Shdr>(header.e_shoff, header.e_shnum.into(), &buf).unwrap();
+
+            let str_table_sec = sections[header.e_shstrndx as usize];
+            let offset = str_table_sec.sh_offset as usize;
+            let str_table = &buf[offset..offset + str_table_sec.sh_size as usize];
+            for section in sections {
+                let name = core::str::from_utf8(
+                    &str_table[section.sh_name as usize..]
+                        .split(|&c| c == 0)
+                        .next()
+                        .unwrap(),
+                )
+                .unwrap();
+                if name == ".bss" {
+                    bss_sec = Some(section.clone());
+                }
+            }
+        }
+
+        if let Some(section) = bss_sec {
+            let offset = section.sh_offset as usize;
+            // Edge case: bss section lies outside of the padded file
+            if offset + section.sh_size as usize > buf.len() {
+                let pad_size = offset + section.sh_size as usize - buf.len();
+                let buf_len = buf.len();
+                buf.resize(buf_len + pad_size, 0);
+                // for _ in 0..(offset + section.sh_size as usize - buf.len()) {
+                //     buf.push(0); // TODO: Make more efficient
+                // }
+            }
+            let bss = &mut buf[offset..offset + section.sh_size as usize];
+            for i in bss {
+                *i = 0;
+            }
+        } else {
+            panic!("Kernel does not have a .bss section");
+        }
+    }
+
+    println!(
+        "cargo:warning=Total padding: {} Kb",
+        already_padded_vec.iter().sum::<usize>() / 1024
+    );
     eprintln!("Writing to file");
     kernel_fd
         .seek(std::io::SeekFrom::Start(0))

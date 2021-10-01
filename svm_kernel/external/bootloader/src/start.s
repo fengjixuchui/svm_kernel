@@ -1,19 +1,29 @@
 .section .init_bootloader, "awx"
-.intel_syntax noprefix
 .global _start_bootloader
 .global switch_to_long_mode
 .global jump_to_long_mode
+.global gdt_64_pointer
 
+.code32
 _start_bootloader:
+    lgdt gdt_64_pointer
+    ljmp 24, offset switch_protected_mode
+
+switch_protected_mode:
+    mov dx, 32 # Set ds to 32-bit data segment
+    mov ds, dx
+    mov ss, dx
     mov esp, offset __stack_start
     push ebx
     push eax
     call bootloader_main
 
 switch_to_long_mode:
-    pop eax # return addr
-    pop esi # mem map
-    pop edi # entry_point
+    pop eax # return addr (discarded)
+    pop edi # mem map
+    pop esi # entry_point
+    pop esp # stack pointer
+
     # Write back cache and add a memory fence. I'm not sure if this is
     # necessary, but better be on the safe side.
     wbinvd
@@ -35,32 +45,16 @@ switch_to_long_mode:
     or eax, (1 << 31)
     mov cr0, eax
 
-load_64bit_gdt:
-    lgdt gdt_64_pointer                # Load GDT.Pointer defined below.
-
 jump_to_long_mode:
-    push esi
-    push 0x8
-    push edi
-    retf # Load CS with 64 bit segment and flush the instruction cache
+    ljmp 8, offset reset_state
 
+.align 8
 .code64
-spin_here:
-    jmp spin_here
-
-.align 4
-zero_idt:
-    .word 0
-    .byte 0
-
-gdt_64:
-    .quad 0x0000000000000000          # Null Descriptor - should be present.
-    .quad 0x00209A0000000000          # 64-bit code descriptor (exec/read).
-    .quad 0x0000920000000000          # 64-bit data descriptor (read/write).
-
-.align 4
-    .word 0                              # Padding to make the "address of the GDT" field aligned on a 4-byte boundary
-
-gdt_64_pointer:
-    .word gdt_64_pointer - gdt_64 - 1    # 16-bit Size (Limit) of GDT.
-    .long gdt_64                            # 32-bit Base Address of GDT. (CPU will zero extend to 64-bit)
+reset_state:
+    mov byte ptr [stack_avail], 1
+    xor rax, rax
+    mov ss, rax # in long mode these segment register are ignored
+    mov es, rax
+    mov gs, rax
+    mov ds, rax
+    jmp rsi
