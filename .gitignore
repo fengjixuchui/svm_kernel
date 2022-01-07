@@ -1,16 +1,7 @@
 .vscode
-.envrc
-svm_kernel/out/
-.nat_network
-*.idea
-svm_kernel/external/chocolate_milk/
-svm_kernel/target/
-target/**
-parse-gdt/target/
-gdb.sh
-run_bootloader.sh
-svm_kernel/external/bootloader/target/
-svm_kernel/external/mybootloader/target
+.vscode-exts
+**/target
+**/out
 .direnv
 .ccls-cache
 cpuid.c
@@ -20,7 +11,6 @@ test.rs
 test.c
 .~lock*
 .__pycache__
-.envrc
 .direnv
 .history
 .__pycache__
