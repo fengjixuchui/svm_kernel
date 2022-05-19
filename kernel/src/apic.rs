@@ -15,14 +15,16 @@ const APIC_BASE: u64 = 0x0_0000_FEE0_0000;
 
 pub unsafe fn mp_init(apic_id: u8, trampoline: u32) {
     log::info!("Booting core {}", apic_id);
-    // Send INIT ipi
+    // Create INIT IPI
     let low = InterCmdRegLow::new()
             .with_vec(0) // INIT needs vec to be zero
-            .with_trigger_mode(0) // level-sensitive
+            .with_trigger_mode(0) // edge-triggered
             .with_msg_type(0b101) // INIT type
             .with_level(0) // 0 for INIT
             ;
     let high = InterCmdRegHigh::new().with_dest(apic_id);
+
+    // Sent INIT IPI
     send_ipi(&low, &high);
 
     // Convert func pointer to u64
@@ -45,16 +47,21 @@ pub unsafe fn mp_init(apic_id: u8, trampoline: u32) {
         panic!("Trampoline vector can't use 0xA0-0xBF. Reserved by spec.");
     }
 
-    // Send STARTUP ipi
+    // Sleep 10 milliseconds as by spec
+    crate::time::sleep(10*1000);
+
+    // Create STARTUP IPI
     let low = InterCmdRegLow::new()
             .with_vec(to_vec) // Core execute code at 0x000VV000
-            .with_trigger_mode(0) // level-sensitive
+            .with_trigger_mode(0) // edge-triggered
             .with_msg_type(0b110) // STARTUP type
             .with_level(1) // 1 for everything else
             ;
-    //TODO: Read spec again and implement wait here
 
-    let high = InterCmdRegHigh::new().with_dest(apic_id);
+    // Sent Startup IPI (SIPI)
+    send_ipi(&low, &high);
+
+    // Sent Startup IPI (SIPI)
     send_ipi(&low, &high);
 }
 
@@ -75,7 +82,10 @@ unsafe fn send_ipi(low: &InterCmdRegLow, high: &InterCmdRegHigh) {
         Register::InterCmdRegLow,
         u32::from_le_bytes(low.into_bytes()),
     );
+    // Sleep 200 microseconds as by spec
+    crate::time::sleep(200);
 
+    // Check if ipi has been sent successfull
     if ipi_pending() {
         panic!("APIC has not completed sending the IPI");
     }
@@ -216,10 +226,17 @@ unsafe fn init_timer() {
     let timer = u32::from_le_bytes(timer.into_bytes());
     write_apic(Register::ApicTimer, timer);
 
-    // Calculate this on every cpu anew
-    // by measuring the time with a different clock
-    let one_ms = 423845;
-    write_apic(Register::TimerInitialCount, one_ms * 1000);
+    //TODO: Do this only once, not for every core
+    // Calculate apic tics per second by measuring elapsed ticks
+    // through the PIT timer
+    write_apic(Register::TimerInitialCount, u32::MAX);
+
+    // sleep 1s
+    crate::time::sleep(1000*1000);
+
+    let ticks_elapsed  = u32::MAX - read_apic(Register::TimerCurrentCount);
+
+    write_apic(Register::TimerInitialCount, ticks_elapsed);
 }
 
 fn apic_id_from_mem() -> u8 {
